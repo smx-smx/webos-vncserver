@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.14)
 project (webos-vncserver C)
 
+# LG NetCast 4.x: a standalone binary, without the Luna service and webOS libraries
+option(NC4 "Build for LG NetCast 4.x" OFF)
+if (NC4)
+    include(nc4.cmake)
+    return()
+endif ()
+
 add_subdirectory(prebuilt)
 add_subdirectory(tv-native-apis)
 

@@ -13,7 +13,9 @@
 #define XK_MISCELLANY
 #include "keysymdef.h"
 #include "uinput.h"
+#ifndef NC4
 #include <im.h>
+#endif
 
 static int fd = 0;
 
@@ -81,10 +83,12 @@ int initialize_uinput(void)
 		return -1;
 	}
 
+#ifndef NC4
 	if (IM_RequestToCheckInput() < 0) {
 		printf("IM_RequestToCheckInput() failed\n");
 		return -1;
 	}
+#endif
 
 	return 0;
 }

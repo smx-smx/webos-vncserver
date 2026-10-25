@@ -20,16 +20,24 @@ unsigned int screenwidth = 1920;
 unsigned int screenheight = 1080;
 const unsigned int bpp = 4;
 
+#ifdef NC4
+/* the OSD and the cursor coordinates are 1280x720 */
+unsigned int nativewidth = 1280;
+unsigned int nativeheight = 720;
+#else
 unsigned int nativewidth = 1920;
 unsigned int nativeheight = 1080;
+#endif
 
 #define FBSIZE (screenwidth * screenheight * bpp)
 
+#ifndef NC4
 static gboolean server_frame_handler(gpointer data) {
 	server_t* server = (server_t*) data;
    	server_update(data);
 	return server->running;
 }
+#endif
 
 int capture_backend_load(capture_backend_t* backend, const char* name) {
 	void* handle;
@@ -51,6 +59,18 @@ int capture_backend_load(capture_backend_t* backend, const char* name) {
 
 int capture_backend_init(capture_backend_t* backend, uint32_t width, uint32_t height) {
 	int ret;
+
+#ifdef NC4
+	if ((ret = capture_backend_load(backend, "libcapture_nc4.so")) != 0) {
+		DBG("%s load failed: %d", "libcapture_nc4", ret);
+	} else if ((ret = backend->init(width, height)) != 0) {
+		DBG("%s init failed: %d", "libcapture_nc4", ret);
+	} else {
+		return 0;
+	}
+	WARN("No eligible capture backends found");
+	return -1;
+#endif
 
 	if ((ret = capture_backend_load(backend, "libcapture_halgal.so")) != 0) {
 		DBG("%s load failed: %d", "libcapture_halgal", ret);
@@ -102,7 +122,7 @@ static void keyevent(rfbBool down, rfbKeySym key, rfbClientPtr cl) {
 
 static void ptrevent(int buttonMask, int x, int y, rfbClientPtr cl) {
 	// fprintf(stderr, "%03d x %03d: %08x\n", x, y, buttonMask);
-	ptr_abs(x * 1920 / cl->screen->width, y * 1080 / cl->screen->height, buttonMask);
+	ptr_abs(x * nativewidth / cl->screen->width, y * nativeheight / cl->screen->height, buttonMask);
 }
 
 int server_start(server_t* server, settings_t* settings) {
@@ -166,9 +186,11 @@ int server_start(server_t* server, settings_t* settings) {
 	return 0;
 }
 
+#ifndef NC4
 void server_bind_gmainloop(server_t* server) {
 	server->timeout_ref = g_timeout_add(1000 / server->settings->framerate, server_frame_handler, (gpointer) server);
 }
+#endif
 
 int server_update(server_t* server) {
 	int ret;
@@ -188,7 +210,9 @@ int server_update(server_t* server) {
 
 int server_stop(server_t* server) {
 	INFO("Shutting down...");
+#ifndef NC4
 	g_source_remove(server->timeout_ref);
+#endif
 	server->running = false;
 	server->capture.destroy();
 	rfbShutdownServer(server->screen, TRUE);

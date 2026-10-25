@@ -1,10 +1,14 @@
 #include "log.h"
 #include <stdint.h>
 #include <time.h>
+#ifndef NC4
 #include <PmLogLib.h>
+#endif
 
 uint64_t start = 0;
+#ifndef NC4
 PmLogContext context;
+#endif
 LogLevel current_log_level = Info;
 
 uint64_t getticks_us()
@@ -15,7 +19,9 @@ uint64_t getticks_us()
 }
 
 void log_init() {
+#ifndef NC4
     PmLogGetContext("webos-vncserver", &context);
+#endif
 }
 
 void log_set_level(LogLevel level) {
@@ -45,7 +51,9 @@ void log_printf(LogLevel level, const char* module, const char* fmt, ...) {
         color_str = "\x1b[31m";
     }
 
+#ifndef NC4
     PmLogVPrint(context, level, fmt, args);
+#endif
 
     if (level <= current_log_level) {
         fprintf(stderr, "%10.3fs %s[%4s %-20s]\x1b[0m ", (getticks_us() - start)/1000000.0, color_str, level_str, module);

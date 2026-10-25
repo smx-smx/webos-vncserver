@@ -199,6 +199,34 @@ void server_bind_gmainloop(server_t* server) {
 #define TILE_H 16
 
 /*
+ * libvncserver encodes updates from the framebuffer in its client threads,
+ * holding the client's sendMutex: hold all of them while the framebuffer
+ * changes, or an update is a mix of several frames (tearing).
+ */
+#define MAX_LOCKED_CLIENTS 32
+
+static int server_lock_clients(server_t* server, rfbClientPtr* locked) {
+	rfbClientIteratorPtr it = rfbGetClientIterator(server->screen);
+	rfbClientPtr cl;
+	int count = 0;
+
+	while ((cl = rfbClientIteratorNext(it)) != NULL && count < MAX_LOCKED_CLIENTS) {
+		rfbIncrClientRef(cl);
+		LOCK(cl->sendMutex);
+		locked[count++] = cl;
+	}
+	rfbReleaseClientIterator(it);
+	return count;
+}
+
+static void server_unlock_clients(rfbClientPtr* locked, int count) {
+	while (count-- > 0) {
+		UNLOCK(locked[count]->sendMutex);
+		rfbDecrClientRef(locked[count]);
+	}
+}
+
+/*
  * Copy the tiles that changed since the last frame to the framebuffer and mark
  * them as modified, one rectangle per row of tiles, so that an unchanged
  * screen sends nothing and a small change doesn't resend the whole frame.
@@ -256,7 +284,11 @@ int server_update(server_t* server) {
 			return -5;
 		}
 
+		rfbClientPtr locked[MAX_LOCKED_CLIENTS];
+		int count = server_lock_clients(server, locked);
+
 		server_mark_changes(server);
+		server_unlock_clients(locked, count);
 	}
 
 	return 0;

@@ -8,9 +8,15 @@
  * system bus) for the visible windows and their surfaces, maps the surfaces
  * from /dev/mem and merges them the same way. The video plane (TV picture,
  * hardware-decoded video) is not captured and shows as black.
+ *
+ * Reading a surface takes tens of milliseconds (it is mapped uncached), while
+ * apps keep drawing to it, so every window is first copied to a surface of
+ * our own by procmgr's graphics engine (HOA_GX_BlitWindowToSurface), which
+ * takes a millisecond or two, and read from there without tearing.
  */
 #include <dbus/dbus.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,6 +41,7 @@
 #define SURFACE_INFO_SIZE 1064
 
 typedef struct {
+	uint32_t id;
 	uint32_t phys;
 	uint16_t pitch;
 	uint16_t bpp;
@@ -57,21 +64,24 @@ static uint32_t* screen;   /* SCREEN_W x SCREEN_H composite */
 static uint32_t* row;      /* one source row, read from uncached memory in one go */
 static mapping_t mappings[MAX_MAPPINGS];
 static int use_back;
+static int direct;                       /* read the windows' own surfaces */
+static surface_t snapshots[MAX_WINDOWS]; /* our copies of the windows, id 0 if not created */
 
-static DBusMessage* gx_call(const char* method, int window) {
+/* procmgr GX methods take the caller's PID and service name, then their own arguments */
+static DBusMessage* gx_call(const char* method, int first_arg_type, ...) {
 	DBusMessage *msg, *reply;
 	DBusError err;
 	dbus_int32_t pid = getpid();
 	const char* name = CLIENT_NAME;
+	va_list args;
 
 	msg = dbus_message_new_method_call(GX_SERVICE, GX_PATH, GX_INTERFACE, method);
 	if (!msg)
 		return NULL;
 	dbus_message_append_args(msg, DBUS_TYPE_INT32, &pid, DBUS_TYPE_STRING, &name, DBUS_TYPE_INVALID);
-	if (window >= 0) {
-		dbus_int32_t w = window;
-		dbus_message_append_args(msg, DBUS_TYPE_INT32, &w, DBUS_TYPE_INVALID);
-	}
+	va_start(args, first_arg_type);
+	dbus_message_append_args_valist(msg, first_arg_type, args);
+	va_end(args);
 	dbus_error_init(&err);
 	reply = dbus_connection_send_with_reply_and_block(bus, msg, 1000, &err);
 	dbus_message_unref(msg);
@@ -84,7 +94,7 @@ static DBusMessage* gx_call(const char* method, int window) {
 
 /* window IDs from the lowest to the highest Z-order */
 static int get_visible_windows(int* ids, int max) {
-	DBusMessage* reply = gx_call("HOA_GX_GetVisibleWindowList", -1);
+	DBusMessage* reply = gx_call("HOA_GX_GetVisibleWindowList", DBUS_TYPE_INVALID);
 	dbus_int32_t* list = NULL;
 	int count = 0, i;
 	dbus_bool_t ok = FALSE;
@@ -118,11 +128,20 @@ static uint32_t hex_le(const char* s, int bytes) {
 	return v;
 }
 
+static void parse_surface_info(const char* info, surface_t* surface) {
+	surface->id = hex_le(info, 4);
+	surface->phys = hex_le(info + 16, 4);
+	surface->pitch = hex_le(info + 24, 2);
+	surface->bpp = hex_le(info + 28, 2);
+	surface->width = hex_le(info + 32, 2);
+	surface->height = hex_le(info + 36, 2);
+}
+
 static int get_surface(int window, surface_t* surface) {
-	DBusMessage* reply = gx_call("HOA_GX_GetWindowSurfaceInfo", window);
+	dbus_int32_t w = window;
+	DBusMessage* reply = gx_call("HOA_GX_GetWindowSurfaceInfo", DBUS_TYPE_INT32, &w, DBUS_TYPE_INVALID);
 	const char* hex = NULL;
 	dbus_bool_t ok = FALSE;
-	const char* info;
 
 	if (!reply)
 		return -1;
@@ -131,14 +150,79 @@ static int get_surface(int window, surface_t* surface) {
 		dbus_message_unref(reply);
 		return -1;
 	}
-	info = use_back ? hex : hex + 2 * SURFACE_INFO_SIZE;
-	surface->phys = hex_le(info + 16, 4);
-	surface->pitch = hex_le(info + 24, 2);
-	surface->bpp = hex_le(info + 28, 2);
-	surface->width = hex_le(info + 32, 2);
-	surface->height = hex_le(info + 36, 2);
+	parse_surface_info(use_back ? hex : hex + 2 * SURFACE_INFO_SIZE, surface);
 	dbus_message_unref(reply);
 	return 0;
+}
+
+#define HOA_GX_PIXEL_FORMAT_ARGB 0
+#define HOA_GX_WINDOW_NONE 79
+
+static int create_surface(surface_t* surface) {
+	dbus_uint16_t w = SCREEN_W, h = SCREEN_H;
+	dbus_int32_t format = HOA_GX_PIXEL_FORMAT_ARGB;
+	DBusMessage* reply = gx_call("HOA_GX_CreateSurface", DBUS_TYPE_UINT16, &w, DBUS_TYPE_UINT16, &h,
+		DBUS_TYPE_INT32, &format, DBUS_TYPE_INVALID);
+	const char* hex = NULL;
+	dbus_bool_t ok = FALSE;
+
+	if (!reply)
+		return -1;
+	if (!dbus_message_get_args(reply, NULL, DBUS_TYPE_STRING, &hex, DBUS_TYPE_BOOLEAN, &ok, DBUS_TYPE_INVALID) ||
+			!ok || strlen(hex) < 2 * SURFACE_INFO_SIZE) {
+		dbus_message_unref(reply);
+		return -1;
+	}
+	parse_surface_info(hex, surface);
+	dbus_message_unref(reply);
+	return surface->id ? 0 : -1;
+}
+
+static void destroy_surface(surface_t* surface) {
+	dbus_int32_t id = surface->id;
+	DBusMessage* reply = gx_call("HOA_GX_DestroySurface", DBUS_TYPE_INT32, &id, DBUS_TYPE_INVALID);
+
+	if (reply)
+		dbus_message_unref(reply);
+	surface->id = 0;
+}
+
+/* copy a window to one of our surfaces with the graphics engine, without blending */
+static int blit_window(int window, uint16_t width, uint16_t height, const surface_t* target) {
+	/* libafopenapi's blit request, sent as hex */
+	struct __attribute__((packed)) {
+		uint32_t source_type;      /* 0: window */
+		uint32_t source_window;
+		uint16_t x, y, w, h;       /* source rectangle */
+		uint32_t target_surface;
+		uint32_t target_window;    /* HOA_GX_WINDOW_NONE: the target is a surface */
+		uint16_t target_x, target_y;
+		uint32_t flags;            /* 0: copy */
+		uint32_t settings[9];
+	} request;
+	char hex[2 * sizeof(request) + 1];
+	const char* payload = hex;
+	const uint8_t* bytes = (const uint8_t*) &request;
+	DBusMessage* reply;
+	dbus_bool_t ok = FALSE;
+	size_t i;
+
+	memset(&request, 0, sizeof(request));
+	request.source_window = window;
+	request.w = width;
+	request.h = height;
+	request.target_surface = target->id;
+	request.target_window = HOA_GX_WINDOW_NONE;
+	for (i = 0; i < sizeof(request); i++)
+		sprintf(hex + 2 * i, "%02x", bytes[i]);
+
+	reply = gx_call("HOA_GX_BlitWindowToSurface", DBUS_TYPE_STRING, &payload, DBUS_TYPE_INVALID);
+	if (!reply)
+		return -1;
+	if (!dbus_message_get_args(reply, NULL, DBUS_TYPE_BOOLEAN, &ok, DBUS_TYPE_INVALID))
+		ok = FALSE;
+	dbus_message_unref(reply);
+	return ok ? 0 : -1;
 }
 
 static uint8_t* map_surface(const surface_t* s) {
@@ -236,6 +320,8 @@ int capture_init(uint32_t width, uint32_t height) {
 	const char* buffer = getenv("NC4_CAPTURE_BUFFER");
 
 	use_back = buffer && strcmp(buffer, "back") == 0;
+	/* NC4_CAPTURE_DIRECT=1: no copies, faster but apps that are drawing tear */
+	direct = getenv("NC4_CAPTURE_DIRECT") && atoi(getenv("NC4_CAPTURE_DIRECT"));
 	out_w = width;
 	out_h = height;
 
@@ -264,6 +350,7 @@ int capture_init(uint32_t width, uint32_t height) {
 
 int capture_execute(uint8_t* target, uint32_t size) {
 	int ids[MAX_WINDOWS];
+	surface_t surfaces[MAX_WINDOWS];
 	int count, i, merged = 0;
 	uint32_t x, y;
 	/* at the native size, merge straight into the target */
@@ -278,15 +365,45 @@ int capture_execute(uint8_t* target, uint32_t size) {
 
 	memset(dest, 0, SCREEN_W * SCREEN_H * 4);
 	count = get_visible_windows(ids, MAX_WINDOWS);
+
+	/* first take all the copies, as close together as possible */
 	for (i = 0; i < count; i++) {
-		surface_t s;
+		surface_t* s = &surfaces[i];
+
+		if (get_surface(ids[i], s) != 0 || s->bpp != 32 || !s->phys) {
+			s->phys = 0;
+			continue;
+		}
+		if (s->width > SCREEN_W)
+			s->width = SCREEN_W;
+		if (s->height > SCREEN_H)
+			s->height = SCREEN_H;
+		if (direct)
+			continue;
+		if (!snapshots[i].id && create_surface(&snapshots[i]) != 0) {
+			fprintf(stderr, "capture_nc4: HOA_GX_CreateSurface failed, reading the windows directly\n");
+			direct = 1;
+			continue;
+		}
+		if (blit_window(ids[i], s->width, s->height, &snapshots[i]) == 0) {
+			uint16_t width = s->width, height = s->height;
+
+			*s = snapshots[i];
+			s->width = width;
+			s->height = height;
+		} else {
+			static int warned;
+			if (!warned++)
+				fprintf(stderr, "capture_nc4: HOA_GX_BlitWindowToSurface(%d) failed, reading it directly\n", ids[i]);
+		}
+	}
+
+	for (i = 0; i < count; i++) {
 		uint8_t* pixels;
 
-		if (get_surface(ids[i], &s) != 0 || s.bpp != 32 || !s.phys)
+		if (!surfaces[i].phys || !(pixels = map_surface(&surfaces[i])))
 			continue;
-		if (!(pixels = map_surface(&s)))
-			continue;
-		merge(dest, &s, pixels, merged == 0);
+		merge(dest, &surfaces[i], pixels, merged == 0);
 		merged++;
 	}
 
@@ -310,6 +427,9 @@ int capture_destroy() {
 			munmap(m->map, m->length + (m->phys - (m->phys & ~4095u)));
 		m->map = NULL;
 	}
+	for (i = 0; i < MAX_WINDOWS; i++)
+		if (snapshots[i].id && bus)
+			destroy_surface(&snapshots[i]);
 	if (bus) {
 		dbus_connection_close(bus);
 		dbus_connection_unref(bus);

@@ -9,6 +9,7 @@
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(VNCSERVER REQUIRED libvncserver)
 pkg_check_modules(DBUS REQUIRED dbus-1)
+pkg_check_modules(CRYPTO REQUIRED libcrypto)
 
 add_executable(webos-vncserver
     src/main.c
@@ -19,7 +20,7 @@ add_executable(webos-vncserver
 )
 target_compile_definitions(webos-vncserver PRIVATE NC4)
 target_include_directories(webos-vncserver PRIVATE ${VNCSERVER_INCLUDE_DIRS})
-target_link_libraries(webos-vncserver ${VNCSERVER_LDFLAGS} pthread dl)
+target_link_libraries(webos-vncserver ${VNCSERVER_LDFLAGS} ${CRYPTO_LDFLAGS} pthread dl)
 set_target_properties(webos-vncserver PROPERTIES INSTALL_RPATH "$ORIGIN:$ORIGIN/lib")
 
 add_library(capture_nc4 SHARED src/capture_nc4.c)
@@ -28,6 +29,8 @@ target_link_libraries(capture_nc4 ${DBUS_LDFLAGS})
 set_target_properties(capture_nc4 PROPERTIES INSTALL_RPATH "$ORIGIN")
 
 install(TARGETS webos-vncserver capture_nc4 RUNTIME DESTINATION . LIBRARY DESTINATION lib)
+# OpenSSL 3 legacy provider, for the DES of VNC authentication
+install(FILES ${CMAKE_SYSROOT}/usr/lib/ossl-modules/legacy.so DESTINATION lib/ossl-modules)
 
 # The TV has none of these: bundle them under their SONAME
 install(CODE "

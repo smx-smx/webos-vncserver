@@ -8,7 +8,28 @@
 #include "log.h"
 
 #ifdef NC4
+#include <libgen.h>
+#include <limits.h>
+#include <openssl/provider.h>
+
 static volatile sig_atomic_t stop;
+
+/*
+ * libvncserver encrypts the VNC authentication challenge with OpenSSL's DES,
+ * which OpenSSL 3 only has in the legacy provider: load it from lib/ossl-modules.
+ */
+static void load_openssl_providers(void) {
+	char exe[PATH_MAX], dir[PATH_MAX];
+	ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+
+	if (len > 0) {
+		exe[len] = 0;
+		snprintf(dir, sizeof(dir), "%s/lib/ossl-modules", dirname(exe));
+		OSSL_PROVIDER_set_default_search_path(NULL, dir);
+	}
+	if (!OSSL_PROVIDER_load(NULL, "legacy") || !OSSL_PROVIDER_load(NULL, "default"))
+		WARN("Could not load the OpenSSL legacy provider, VNC authentication won't work");
+}
 
 void int_handler(int dummy) {
 	stop = 1;
@@ -44,6 +65,7 @@ int main (int argc, char** argv) {
 	settings.height = 720;
 	settings.password = strdup("password");
 	settings_load_env(&settings);
+	load_openssl_providers();
 
 	if ((ret = server_start(&server, &settings)) != 0) {
 		ERR("server_start() failed: %d", ret);

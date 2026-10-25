@@ -180,7 +180,29 @@ static uint8_t* map_surface(const surface_t* s) {
 	return m->pixels;
 }
 
-static void merge(const surface_t* s, const uint8_t* pixels, int copy) {
+/*
+ * The surfaces are mapped uncached: every load is a bus transaction, so read
+ * them with the widest loads available (64 bytes per NEON vldm) instead of
+ * memcpy().
+ */
+static void copy_uncached(void* dst, const void* src, size_t n) {
+#if defined(__ARM_NEON__) || defined(__ARM_NEON)
+	if ((((uintptr_t) dst | (uintptr_t) src) & 7) == 0) {
+		while (n >= 64) {
+			__asm__ volatile(
+				"vldm %0!, {d0-d7}\n"
+				"vstm %1!, {d0-d7}\n"
+				: "+r"(src), "+r"(dst)
+				:
+				: "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "memory");
+			n -= 64;
+		}
+	}
+#endif
+	memcpy(dst, src, n);
+}
+
+static void merge(uint32_t* screen, const surface_t* s, const uint8_t* pixels, int copy) {
 	uint32_t w = s->width < SCREEN_W ? s->width : SCREEN_W;
 	uint32_t h = s->height < SCREEN_H ? s->height : SCREEN_H;
 	uint32_t x, y;
@@ -188,11 +210,11 @@ static void merge(const surface_t* s, const uint8_t* pixels, int copy) {
 	for (y = 0; y < h; y++) {
 		uint32_t* dst = screen + y * SCREEN_W;
 
-		memcpy(row, pixels + (size_t) y * s->pitch, w * 4);
 		if (copy) {
-			memcpy(dst, row, w * 4);
+			copy_uncached(dst, pixels + (size_t) y * s->pitch, w * 4);
 			continue;
 		}
+		copy_uncached(row, pixels + (size_t) y * s->pitch, w * 4);
 		for (x = 0; x < w; x++) {
 			uint32_t src = row[x];
 			uint32_t a = src >> 24;
@@ -244,6 +266,9 @@ int capture_execute(uint8_t* target, uint32_t size) {
 	int ids[MAX_WINDOWS];
 	int count, i, merged = 0;
 	uint32_t x, y;
+	/* at the native size, merge straight into the target */
+	int direct = out_w == SCREEN_W && out_h == SCREEN_H;
+	uint32_t* dest = direct ? (uint32_t*) target : screen;
 
 	if (size < out_w * out_h * 4)
 		return -1;
@@ -251,7 +276,7 @@ int capture_execute(uint8_t* target, uint32_t size) {
 	for (i = 0; i < MAX_MAPPINGS; i++)
 		mappings[i].age++;
 
-	memset(screen, 0, SCREEN_W * SCREEN_H * 4);
+	memset(dest, 0, SCREEN_W * SCREEN_H * 4);
 	count = get_visible_windows(ids, MAX_WINDOWS);
 	for (i = 0; i < count; i++) {
 		surface_t s;
@@ -261,13 +286,11 @@ int capture_execute(uint8_t* target, uint32_t size) {
 			continue;
 		if (!(pixels = map_surface(&s)))
 			continue;
-		merge(&s, pixels, merged == 0);
+		merge(dest, &s, pixels, merged == 0);
 		merged++;
 	}
 
-	if (out_w == SCREEN_W && out_h == SCREEN_H) {
-		memcpy(target, screen, SCREEN_W * SCREEN_H * 4);
-	} else {
+	if (!direct) {
 		uint32_t* dst = (uint32_t*) target;
 		for (y = 0; y < out_h; y++) {
 			const uint32_t* src = screen + (y * SCREEN_H / out_h) * SCREEN_W;

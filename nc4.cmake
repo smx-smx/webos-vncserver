@@ -26,6 +26,8 @@ set_target_properties(webos-vncserver PROPERTIES INSTALL_RPATH "$ORIGIN:$ORIGIN/
 add_library(capture_nc4 SHARED src/capture_nc4.c)
 target_include_directories(capture_nc4 PRIVATE ${DBUS_INCLUDE_DIRS})
 target_link_libraries(capture_nc4 ${DBUS_LDFLAGS})
+# the TVs' Cortex-A9 has NEON, used to read the uncached surfaces
+target_compile_options(capture_nc4 PRIVATE -mfpu=neon)
 set_target_properties(capture_nc4 PROPERTIES INSTALL_RPATH "$ORIGIN")
 
 install(TARGETS webos-vncserver capture_nc4 RUNTIME DESTINATION . LIBRARY DESTINATION lib)

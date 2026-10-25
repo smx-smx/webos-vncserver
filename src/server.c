@@ -108,6 +108,7 @@ static void server_client_gone(rfbClientPtr cl) {
 static enum rfbNewClientAction server_client_incoming(rfbClientPtr cl) {
 	server_t* server = (server_t*) cl->screen->screenData;
 	server->active_clients += 1;
+	server->full_update = true;
 
 	cl->clientGoneHook = &server_client_gone;
 
@@ -166,6 +167,8 @@ int server_start(server_t* server, settings_t* settings) {
 
 	int fbsize = screen->width * screen->height * bpp;
 	screen->frameBuffer = malloc (fbsize);
+	server->capture_buffer = malloc (fbsize);
+	server->full_update = true;
 
 	if (settings->password && strlen(settings->password)) {
 		char** passwords = calloc(2, sizeof(char*));
@@ -192,16 +195,68 @@ void server_bind_gmainloop(server_t* server) {
 }
 #endif
 
+#define TILE_W 64
+#define TILE_H 16
+
+/*
+ * Copy the tiles that changed since the last frame to the framebuffer and mark
+ * them as modified, one rectangle per row of tiles, so that an unchanged
+ * screen sends nothing and a small change doesn't resend the whole frame.
+ */
+static void server_mark_changes(server_t* server) {
+	rfbScreenInfoPtr screen = server->screen;
+	uint8_t* dst = (uint8_t*) screen->frameBuffer;
+	uint8_t* src = server->capture_buffer;
+	int stride = screen->width * bpp;
+	int tx, ty, y;
+
+	if (server->full_update) {
+		memcpy(dst, src, stride * screen->height);
+		rfbMarkRectAsModified(screen, 0, 0, screen->width, screen->height);
+		server->full_update = false;
+		return;
+	}
+
+	for (ty = 0; ty < screen->height; ty += TILE_H) {
+		int th = screen->height - ty < TILE_H ? screen->height - ty : TILE_H;
+		int x1 = -1, x2 = -1;
+
+		for (tx = 0; tx < screen->width; tx += TILE_W) {
+			int tw = screen->width - tx < TILE_W ? screen->width - tx : TILE_W;
+			bool changed = false;
+
+			for (y = ty; y < ty + th; y++) {
+				size_t off = (size_t) y * stride + tx * bpp;
+				if (memcmp(dst + off, src + off, tw * bpp) != 0) {
+					changed = true;
+					break;
+				}
+			}
+			if (!changed)
+				continue;
+			for (y = ty; y < ty + th; y++) {
+				size_t off = (size_t) y * stride + tx * bpp;
+				memcpy(dst + off, src + off, tw * bpp);
+			}
+			if (x1 < 0)
+				x1 = tx;
+			x2 = tx + tw;
+		}
+		if (x1 >= 0)
+			rfbMarkRectAsModified(screen, x1, ty, x2, ty + th);
+	}
+}
+
 int server_update(server_t* server) {
 	int ret;
 	if (server->active_clients > 0) {
 		int fbsize = server->screen->width * server->screen->height * bpp;
-		if ((ret = server->capture.execute(server->screen->frameBuffer, fbsize)) != 0) {
+		if ((ret = server->capture.execute(server->capture_buffer, fbsize)) != 0) {
 			ERR("capture execute failed: %08x", ret);
 			return -5;
 		}
 
-		rfbMarkRectAsModified(server->screen, 0, 0, server->screen->width, server->screen->height);
+		server_mark_changes(server);
 	}
 
 	return 0;
@@ -217,6 +272,7 @@ int server_stop(server_t* server) {
 	server->capture.destroy();
 	rfbShutdownServer(server->screen, TRUE);
 	free(server->screen->frameBuffer);
+	free(server->capture_buffer);
 	rfbScreenCleanup(server->screen);
 	shutdown_uinput();
 

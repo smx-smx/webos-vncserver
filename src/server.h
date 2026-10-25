@@ -17,6 +17,8 @@ typedef struct _capture_backend {
 typedef struct {
 	capture_backend_t capture;
 	rfbScreenInfoPtr screen;
+	uint8_t* capture_buffer; /* new frame, compared with screen->frameBuffer */
+	bool full_update;        /* send the whole frame, e.g. for a new client */
 	int active_clients;
 	settings_t* settings;
 	bool running;

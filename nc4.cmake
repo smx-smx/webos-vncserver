@@ -29,6 +29,7 @@ target_link_libraries(capture_nc4 ${DBUS_LDFLAGS})
 set_target_properties(capture_nc4 PROPERTIES INSTALL_RPATH "$ORIGIN")
 
 install(TARGETS webos-vncserver capture_nc4 RUNTIME DESTINATION . LIBRARY DESTINATION lib)
+install(PROGRAMS nc4/vncserver.sh DESTINATION .)
 # OpenSSL 3 legacy provider, for the DES of VNC authentication
 install(FILES ${CMAKE_SYSROOT}/usr/lib/ossl-modules/legacy.so DESTINATION lib/ossl-modules)
 

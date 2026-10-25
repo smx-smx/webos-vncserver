@@ -44,6 +44,36 @@ by `ls-hubd` when called by frontend.
   make sure your VNC clients supports it.
 - All configuration changes cause client disconnects.
 
+## LG NetCast 4.x
+
+`-DNC4=ON` builds a standalone server for NetCast 4.x TVs (2013-2014), run as
+root (e.g. over the openlgtv root shell):
+
+```
+cmake -B build-nc4 -DNC4=ON \
+    -DCMAKE_TOOLCHAIN_FILE=<buildroot-nc4>/output/host/share/buildroot/toolchainfile.cmake
+cmake --build build-nc4
+cmake --install build-nc4 --prefix <usb>/nc4-homebrew/vncserver
+```
+
+with libvncserver, jpeg-turbo and dbus enabled in the buildroot config. The
+install directory contains the binary, `vncserver.sh` and the libraries the TV
+doesn't have.
+
+```
+./vncserver.sh start    # stop, status, run (foreground)
+```
+
+Settings are environment variables, which `vncserver.sh` also reads from
+`vncserver.env`: `VNC_PASSWORD` (default `password`, empty for none),
+`VNC_WIDTH`/`VNC_HEIGHT` (default 1280x720, the OSD resolution) and
+`VNC_FRAMERATE` (default 15).
+
+- The screen is captured from the HOA_GX windows that procmgr composites (TV
+  UI and apps), not the video plane.
+- Keyboard and mouse are uinput devices that procmgr picks up like USB ones:
+  the right button is a right click, not BACK.
+
 ## Keybindings
 
 - SUPER ("Windows") button is HOME

@@ -9,6 +9,7 @@
 
 #ifdef NC4
 #include <libgen.h>
+#include <time.h>
 #include <limits.h>
 #include <openssl/provider.h>
 
@@ -74,8 +75,16 @@ int main (int argc, char** argv) {
 	signal(SIGINT, int_handler);
 	signal(SIGTERM, int_handler);
 	while (!stop) {
+		/* the capture takes a good part of the frame time: sleep for the rest */
+		struct timespec start, end;
+		long elapsed, period = 1000000 / settings.framerate;
+
+		clock_gettime(CLOCK_MONOTONIC, &start);
 		server_update(&server);
-		usleep(1000000 / settings.framerate);
+		clock_gettime(CLOCK_MONOTONIC, &end);
+		elapsed = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_nsec - start.tv_nsec) / 1000;
+		if (elapsed < period)
+			usleep(period - elapsed);
 	}
 	INFO("Signal received, stopping...");
 	server_stop(&server);

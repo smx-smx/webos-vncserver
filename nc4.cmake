@@ -8,6 +8,7 @@
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(VNCSERVER REQUIRED libvncserver)
+pkg_check_modules(DBUS REQUIRED dbus-1)
 
 add_executable(webos-vncserver
     src/main.c
@@ -21,16 +22,22 @@ target_include_directories(webos-vncserver PRIVATE ${VNCSERVER_INCLUDE_DIRS})
 target_link_libraries(webos-vncserver ${VNCSERVER_LDFLAGS} pthread dl)
 set_target_properties(webos-vncserver PROPERTIES INSTALL_RPATH "$ORIGIN:$ORIGIN/lib")
 
-install(TARGETS webos-vncserver RUNTIME DESTINATION .)
+add_library(capture_nc4 SHARED src/capture_nc4.c)
+target_include_directories(capture_nc4 PRIVATE ${DBUS_INCLUDE_DIRS})
+target_link_libraries(capture_nc4 ${DBUS_LDFLAGS})
+set_target_properties(capture_nc4 PROPERTIES INSTALL_RPATH "$ORIGIN")
+
+install(TARGETS webos-vncserver capture_nc4 RUNTIME DESTINATION . LIBRARY DESTINATION lib)
 
 # The TV has none of these: bundle them under their SONAME
 install(CODE "
     file(GET_RUNTIME_DEPENDENCIES
         EXECUTABLES \"\${CMAKE_INSTALL_PREFIX}/webos-vncserver\"
+        LIBRARIES \"\${CMAKE_INSTALL_PREFIX}/lib/libcapture_nc4.so\"
         RESOLVED_DEPENDENCIES_VAR deps
-        DIRECTORIES \"${CMAKE_SYSROOT}/usr/lib\"
+        DIRECTORIES \"${CMAKE_SYSROOT}/usr/lib\" \"${CMAKE_SYSROOT}/lib\"
         PRE_EXCLUDE_REGEXES \"^lib(c|m|dl|pthread|rt|gcc_s)\\\\.so\" \"^ld-linux\"
-        POST_INCLUDE_REGEXES \"^${CMAKE_SYSROOT}/usr/lib/\"
+        POST_INCLUDE_REGEXES \"^${CMAKE_SYSROOT}/(usr/)?lib/\"
         POST_EXCLUDE_REGEXES \".*\")
     foreach(dep \${deps})
         execute_process(COMMAND \"${CMAKE_OBJDUMP}\" -p \"\${dep}\" OUTPUT_VARIABLE dump)

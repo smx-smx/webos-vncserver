@@ -17,6 +17,7 @@
 #include <im.h>
 #endif
 
+#ifndef NC4
 static int fd = 0;
 
 // x11vnc/src/uinput.c
@@ -83,12 +84,10 @@ int initialize_uinput(void)
 		return -1;
 	}
 
-#ifndef NC4
 	if (IM_RequestToCheckInput() < 0) {
 		printf("IM_RequestToCheckInput() failed\n");
 		return -1;
 	}
-#endif
 
 	return 0;
 }
@@ -182,6 +181,177 @@ void uinput_key_command(int down, int keysym) {
 	ev.value = 0;
 	write(fd, &ev, sizeof(ev));
 }
+
+#else /* NC4 */
+
+/*
+ * procmgr reads the input devices itself: a device with EV_REL is a mouse
+ * (whose ABS_X/ABS_Y set the cursor position in 1280x720 coordinates), one
+ * with only EV_KEY a keyboard. It only scans /dev/input when told that a new
+ * device was attached, with key code 1266 on one of the devices it reads, e.g.
+ * its own "LGE KEY RETURNPATH".
+ */
+#define NC4_KEY_NEW_DEVICE 1266
+#define NC4_SCREEN_W 1280
+#define NC4_SCREEN_H 720
+
+static int kbd_fd = -1;
+static int mouse_fd = -1;
+
+static void emit(int fd, int type, int code, int value) {
+	struct input_event ev;
+
+	memset(&ev, 0, sizeof(ev));
+	gettimeofday(&ev.time, NULL);
+	ev.type = type;
+	ev.code = code;
+	ev.value = value;
+	if (write(fd, &ev, sizeof(ev)) != sizeof(ev))
+		perror("uinput write");
+}
+
+static int create_device(const char* name, int mouse) {
+	struct uinput_user_dev udev;
+	int fd, i;
+
+	fd = open("/dev/uinput", O_WRONLY | O_NDELAY);
+	if (fd < 0) {
+		perror("/dev/uinput");
+		return -1;
+	}
+
+	memset(&udev, 0, sizeof(udev));
+	strncpy(udev.name, name, UINPUT_MAX_NAME_SIZE - 1);
+	udev.id.bustype = BUS_USB;
+	udev.id.version = 1;
+
+	ioctl(fd, UI_SET_EVBIT, EV_SYN);
+	ioctl(fd, UI_SET_EVBIT, EV_KEY);
+	if (mouse) {
+		ioctl(fd, UI_SET_KEYBIT, BTN_LEFT);
+		ioctl(fd, UI_SET_KEYBIT, BTN_RIGHT);
+		ioctl(fd, UI_SET_KEYBIT, BTN_MIDDLE);
+		ioctl(fd, UI_SET_EVBIT, EV_REL);
+		ioctl(fd, UI_SET_RELBIT, REL_X);
+		ioctl(fd, UI_SET_RELBIT, REL_Y);
+		ioctl(fd, UI_SET_RELBIT, REL_WHEEL);
+		ioctl(fd, UI_SET_EVBIT, EV_ABS);
+		ioctl(fd, UI_SET_ABSBIT, ABS_X);
+		ioctl(fd, UI_SET_ABSBIT, ABS_Y);
+		udev.absmax[ABS_X] = NC4_SCREEN_W - 1;
+		udev.absmax[ABS_Y] = NC4_SCREEN_H - 1;
+	} else {
+		for (i = 1; i < 256; i++)
+			ioctl(fd, UI_SET_KEYBIT, i);
+	}
+
+	if (write(fd, &udev, sizeof(udev)) != sizeof(udev) || ioctl(fd, UI_DEV_CREATE) != 0) {
+		perror("UI_DEV_CREATE");
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+/* tell procmgr to scan /dev/input again */
+static int request_input_scan(void) {
+	char path[64], name[64];
+	int i, fd;
+
+	for (i = 0; i < 32; i++) {
+		FILE* f;
+
+		snprintf(path, sizeof(path), "/sys/class/input/event%d/device/name", i);
+		if (!(f = fopen(path, "r")))
+			continue;
+		name[0] = 0;
+		fgets(name, sizeof(name), f);
+		fclose(f);
+		if (strncmp(name, "LGE KEY RETURNPATH", 18) != 0)
+			continue;
+
+		snprintf(path, sizeof(path), "/dev/input/event%d", i);
+		if ((fd = open(path, O_WRONLY)) < 0) {
+			perror(path);
+			return -1;
+		}
+		emit(fd, EV_KEY, NC4_KEY_NEW_DEVICE, 1);
+		emit(fd, EV_KEY, NC4_KEY_NEW_DEVICE, 0);
+		emit(fd, EV_SYN, SYN_REPORT, 0);
+		close(fd);
+		return 0;
+	}
+	printf("LGE KEY RETURNPATH input device not found\n");
+	return -1;
+}
+
+int initialize_uinput(void)
+{
+	if ((kbd_fd = create_device("vncserver keyboard", 0)) < 0)
+		return -1;
+	if ((mouse_fd = create_device("vncserver mouse", 1)) < 0) {
+		shutdown_uinput();
+		return -1;
+	}
+	if (request_input_scan() != 0) {
+		shutdown_uinput();
+		return -1;
+	}
+	return 0;
+}
+
+void shutdown_uinput(void) {
+	/* procmgr notices the removal by itself */
+	if (kbd_fd >= 0) {
+		ioctl(kbd_fd, UI_DEV_DESTROY);
+		close(kbd_fd);
+		kbd_fd = -1;
+	}
+	if (mouse_fd >= 0) {
+		ioctl(mouse_fd, UI_DEV_DESTROY);
+		close(mouse_fd);
+		mouse_fd = -1;
+	}
+}
+
+void ptr_abs(int x, int y, int p) {
+	static int buttons = 0;
+
+	if (mouse_fd < 0)
+		return;
+
+	emit(mouse_fd, EV_ABS, ABS_X, x);
+	emit(mouse_fd, EV_ABS, ABS_Y, y);
+	emit(mouse_fd, EV_SYN, SYN_REPORT, 0);
+
+	if (p & 0x08 || p & 0x10) {
+		emit(mouse_fd, EV_REL, REL_WHEEL, p & 0x08 ? 1 : -1);
+		emit(mouse_fd, EV_SYN, SYN_REPORT, 0);
+		return;
+	}
+	/* button changes only, they are separate events for procmgr */
+	if ((p ^ buttons) & 0x01)
+		emit(mouse_fd, EV_KEY, BTN_LEFT, p & 0x01);
+	if ((p ^ buttons) & 0x02)
+		emit(mouse_fd, EV_KEY, BTN_MIDDLE, (p & 0x02) != 0);
+	if ((p ^ buttons) & 0x04)
+		emit(mouse_fd, EV_KEY, BTN_RIGHT, (p & 0x04) != 0);
+	if ((p ^ buttons) & 0x07)
+		emit(mouse_fd, EV_SYN, SYN_REPORT, 0);
+	buttons = p & 0x07;
+}
+
+void uinput_key_command(int down, int keysym) {
+	int scancode = lookup_code(keysym);
+
+	if (scancode < 0 || kbd_fd < 0)
+		return;
+
+	emit(kbd_fd, EV_KEY, scancode, down);
+	emit(kbd_fd, EV_SYN, SYN_REPORT, 0);
+}
+
+#endif /* NC4 */
 
 // x11vnc/src/uinput.c
 int lookup_code(int keysym) {
